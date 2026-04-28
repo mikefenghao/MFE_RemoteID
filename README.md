@@ -1,0 +1,2 @@
+# MFE_RemoteID
+这是MFE修改remoteid项目，不需要飞控烧录ODID固件也能广播无人机消息
