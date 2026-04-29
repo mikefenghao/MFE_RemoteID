@@ -63,6 +63,10 @@ void handleSave() {
     String new_self_desc = server.arg("self_desc");
     int new_self_type = server.arg("self_type").toInt();
 
+if (new_uasid.length() > ODID_ID_SIZE) new_uasid = new_uasid.substring(0, ODID_ID_SIZE);
+    if (new_opid.length() > ODID_ID_SIZE) new_opid = new_opid.substring(0, ODID_ID_SIZE);
+    if (new_self_desc.length() > ODID_STR_SIZE) new_self_desc = new_self_desc.substring(0, ODID_STR_SIZE);
+
     prefs.begin("mfe_config", false);
     prefs.putString("uasid", new_uasid);
     prefs.putString("opid", new_opid);
