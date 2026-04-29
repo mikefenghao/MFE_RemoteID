@@ -7,9 +7,12 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Preferences.h>
+#include <HTTPUpdateServer.h>
 #include "index_html.h"  // <--- 引入刚才创建的网页文件
 
+
 WebServer server(80);
+HTTPUpdateServer httpUpdater;
 Preferences prefs;
 
 int baud_rate = 115200;
@@ -265,7 +268,7 @@ void setup() {
     baud_rate = prefs.getInt("baud", 57600); // 新设备默认 57600
     saved_ua_type = (uint8_t)prefs.getInt("ua_type", 0); // 默认 None
     saved_id_type = (uint8_t)prefs.getInt("id_type", 0); // 默认 None
-    String s_desc = prefs.getString("self_desc", "MFE RemoteID"); // 默认值
+    String s_desc = prefs.getString("self_desc", "NONE"); // 默认值
     int s_type = prefs.getInt("self_type", 0);
     prefs.end();
 
@@ -298,7 +301,18 @@ void setup() {
 
 
     // 4. 启动 WiFi 配置门户
-    WiFi.softAP("MFE_CONFIG_WIFI", "12345678");
+// 1. 获取 6 字节的原始 MAC
+uint8_t mac[6];
+WiFi.macAddress(mac);
+
+// 2. 使用最后两个字节生成十六进制字符串
+char hexID[5];
+sprintf(hexID, "%02X%02X", mac[4], mac[5]); // 取最后两个字节，比如 EE 和 FF
+
+// 3. 拼接
+String apName = "RemoteID-" + String(hexID);
+WiFi.softAP(apName.c_str(), "12345678");
+    httpUpdater.setup(&server, "/update");
     server.on("/", handleRoot);
     server.on("/save", HTTP_POST, handleSave);
     server.begin();
@@ -314,7 +328,7 @@ void setup() {
 }
 
 void loop() {
-
+     
     server.handleClient(); // 处理网页请求
     // 1. 尽可能快地解析串口数据
     handle_mavlink();

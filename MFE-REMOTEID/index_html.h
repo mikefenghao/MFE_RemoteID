@@ -23,7 +23,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div class="card">
-        <h2>MFE 终端配置 Terminal</h2>
+        <h2> 终端配置 Terminal</h2>
         <form action="/save" method="POST">
             
             <div class="item">
@@ -91,7 +91,11 @@ const char index_html[] PROGMEM = R"rawliteral(
 
             <button type="submit">保存并应用 Save & Apply</button>
         </form>
-        <div class="footer">MFE RemoteID Project v1.6</div>
+        <div class="item" style="margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px;">
+    <label>固件系统 (Firmware Update)</label>
+    <button type="button" onclick="location.href='/update'" style="background: #666;">进入 OTA 升级模式</button>
+     </div>
+        <div class="footer">MFE RemoteID Project v1.0</div>
     </div>
 </body>
 </html>
