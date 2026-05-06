@@ -1,90 +1,82 @@
-#include <Arduino.h>
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEAdvertising.h>
-#include "opendroneid.h" 
+#include "BLE_TX.h"
 #include "common/mavlink.h" // 确保路径正确
-#include <WiFi.h>
-#include <WebServer.h>
+
+
+#include "GB46750-2025.h"
+#include "opendroneid.h"
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include "mavlink_GB46750.h"
+#include <ElegantOTA.h>
 #include <Preferences.h>
-#include <HTTPUpdateServer.h>
-#include "index_html.h"  // <--- 引入刚才创建的网页文件
-
-
-WebServer server(80);
-HTTPUpdateServer httpUpdater;
+#include <index_html.h>
 Preferences prefs;
+WebServer server(80);
+char productID[21] = "SN123456789012345678";
+char regMark[9] = "ABCDEFGH";
+int opCategory = 0; // 0:未定义, 1:开放, 2:特定, 3:审定
+int uaClass = 0;    // 0:微型, 1:轻型...
+int baudRate = 57600;
 
-int baud_rate = 115200;
-uint8_t saved_ua_type = 2; // 默认多旋翼
-uint8_t saved_id_type = 1; // 默认序列号
-
-// --- [ 1. 资源定义 ] ---
-const uint8_t header[] = { 0x1e, 0x16, 0xfa, 0xff, 0x0d };
-BLEAdvertising *pAdvertising;
-uint8_t msg_counters[10] = {0}; 
-uint8_t legacy_phase = 0;      
-uint8_t second_flag = 0;       
-
+static BLE_TX ble;
+ODID_UAS_Data UAS_data;
+GB46750_Data GB46750_Data_T;
 // MAVLink 解析变量
 mavlink_message_t mav_msg;
 mavlink_status_t mav_status;
+uint8_t get_gb46750_speed_accuracy(uint32_t vel_acc_mms) {
+    // 如果值为 0 或未知
+    if (vel_acc_mms == 0) return 0;
 
-// --- [ 2. 核心数据结构 ] ---
-ODID_BasicID_data    basicID_data[2];  
-ODID_Location_data   location_data;    
-ODID_SelfID_data     selfID_data;      
-ODID_System_data     system_data;      
-ODID_OperatorID_data operatorID_data;  
+    float acc_ms = (float)vel_acc_mms / 1000.0f; // 毫米/秒 转为 米/秒
 
-// 网页回调函数
-void handleRoot() {
-    String html = String(index_html);
-    prefs.begin("mfe_config", true);
-    String c_uasid = prefs.getString("uasid", "");
-    String c_opid = prefs.getString("opid", "");
-    String c_self_desc = prefs.getString("self_desc", "MFE RemoteID");
-    int c_self_type = prefs.getInt("self_type", 0);
-    prefs.end();
+    if (acc_ms < 0.3f)  return 4; // 小于 0.3 m/s
+    if (acc_ms < 1.0f)  return 3; // 小于 1 m/s
+    if (acc_ms < 3.0f)  return 2; // 小于 3 m/s
+    if (acc_ms < 10.0f) return 1; // 小于 10 m/s
 
-    // 替换 HTML 模板中的占位符
-    html.replace("name=\"uasid\"", "name=\"uasid\" value=\"" + c_uasid + "\"");
-    html.replace("name=\"opid\"", "name=\"opid\" value=\"" + c_opid + "\"");
-    html.replace("name=\"self_desc\"", "name=\"self_desc\" value=\"" + c_self_desc + "\"");
-    server.send(200, "text/html", html); // 发送替换后的 html 变量
+    return 0; // 大于或等于 10 m/s 或未知
 }
+struct time_last_t{
+    uint32_t system_time_lasttime;
+}time_last;
 
-void handleSave() {
-    String new_uasid = server.arg("uasid");
-    String new_opid = server.arg("opid");
-    int new_baud = server.arg("baud").toInt();
-    int new_ua_type = server.arg("ua_type").toInt();
-    int new_id_type = server.arg("id_type").toInt();
-    String new_self_desc = server.arg("self_desc");
-    int new_self_type = server.arg("self_type").toInt();
+uint8_t get_gb46750_vert_accuracy(uint32_t v_acc_mm) {
+    // 如果值为 0，通常代表未知
+    if (v_acc_mm == 0) return 0; 
 
-if (new_uasid.length() > ODID_ID_SIZE) new_uasid = new_uasid.substring(0, ODID_ID_SIZE);
-    if (new_opid.length() > ODID_ID_SIZE) new_opid = new_opid.substring(0, ODID_ID_SIZE);
-    if (new_self_desc.length() > ODID_STR_SIZE) new_self_desc = new_self_desc.substring(0, ODID_STR_SIZE);
+    float acc_m = (float)v_acc_mm / 1000.0f; // 毫米转为米
 
-    prefs.begin("mfe_config", false);
-    prefs.putString("uasid", new_uasid);
-    prefs.putString("opid", new_opid);
-    prefs.putInt("baud", new_baud);
-    prefs.putInt("ua_type", new_ua_type);
-    prefs.putInt("id_type", new_id_type);
-    prefs.putString("self_desc", new_self_desc);
-    prefs.putInt("self_type", new_self_type);
-    prefs.end();
+    if (acc_m < 1.0f)   return 6; // 小于 1 m
+    if (acc_m < 3.0f)   return 5; // 小于 3 m
+    if (acc_m < 10.0f)  return 4; // 小于 10 m
+    if (acc_m < 25.0f)  return 3; // 小于 25 m
+    if (acc_m < 45.0f)  return 2; // 小于 45 m
+    if (acc_m < 150.0f) return 1; // 小于 150 m
 
-    server.send(200, "text/html", "<h1>OK! Config Saved. Device Rebooting...</h1>");
-    delay(2000);
-    ESP.restart();
+    return 0; // 大于或等于 150 m 或未知
 }
+uint8_t get_gb46750_horiz_accuracy(uint32_t h_acc_mm) {
+    if (h_acc_mm == 0) return 0; // 未知
 
+    float acc_m = (float)h_acc_mm / 1000.0f; // 转换为米
 
-
-// --- [ 3. MAVLink 解析函数 ] ---
+    if (acc_m < 1.0f)       return 12; // 小于 1 m
+    if (acc_m < 3.0f)       return 11; // 小于 3 m
+    if (acc_m < 10.0f)      return 10; // 小于 10 m
+    if (acc_m < 30.0f)      return 9;  // 小于 30 m
+    if (acc_m < 92.6f)      return 8;  // 小于 92.6 m (0.05 n mile)
+    if (acc_m < 185.2f)     return 7;  // 小于 185.2 m (0.1 n mile)
+    if (acc_m < 555.6f)     return 6;  // 小于 555.6 m (0.3 n mile)
+    if (acc_m < 926.0f)     return 5;  // 小于 926 m (0.5 n mile)
+    if (acc_m < 1852.0f)    return 4;  // 小于 1852 m (1 n mile)
+    if (acc_m < 3704.0f)    return 3;  // 小于 3704 m (2 n mile)
+    if (acc_m < 7408.0f)    return 2;  // 小于 7408 m (4 n mile)
+    if (acc_m < 18520.0f)   return 1;  // 小于 18520 m (10 n mile)
+    
+    return 0; // 大于等于 18.52 km 或未知
+}
 void handle_mavlink() {
     while (Serial2.available() > 0) {
         uint8_t c = Serial2.read();
@@ -93,26 +85,15 @@ void handle_mavlink() {
                 case MAVLINK_MSG_ID_GLOBAL_POSITION_INT: {
                     mavlink_global_position_int_t gpi;
                     mavlink_msg_global_position_int_decode(&mav_msg, &gpi);
+                    GB46750_Data_T.ua_lon = gpi.lon;
+                    GB46750_Data_T.ua_lat = gpi.lat;
+                    GB46750_Data_T.alt_geo = gpi.alt / 1000.0f;
+                    GB46750_Data_T.alt_rel = gpi.relative_alt / 1000.0f;
+                    //GB46750_Data_T.alt_baro = location_data.AltitudeGeo;
+                    GB46750_Data_T.track_angle = gpi.hdg / 100.0f;
+                    GB46750_Data_T.speed_gs = sqrt(pow(gpi.vx, 2) + pow(gpi.vy, 2)) / 100.0f;
+                    GB46750_Data_T.speed_v = -gpi.vz/100.0f;
 
-                    // 将飞控数据映射到 RemoteID 结构体
-                    location_data.Latitude = gpi.lat / 10000000.0;
-                    location_data.Longitude = gpi.lon / 10000000.0;
-                    location_data.AltitudeGeo = gpi.alt / 1000.0f;
-                    location_data.Height = gpi.relative_alt / 1000.0f;
-                    location_data.AltitudeBaro = location_data.AltitudeGeo;
-                    
-                    if (location_data.Latitude == 0 && location_data.Longitude == 0) break;
-                    // 计算水平速度 (cm/s -> m/s)
-                    location_data.SpeedHorizontal = sqrt(pow(gpi.vx, 2) + pow(gpi.vy, 2)) / 100.0f;
-                    location_data.Direction = gpi.hdg / 100.0f;
-                    
-                    // 精度处理
-                    location_data.HorizAccuracy = createEnumHorizontalAccuracy(10.0f);
-                    //location_data.TimeStamp = (millis() / 100) % 36000;
-                    //location_data.TimeStamp = (uint16_t)((millis() / 100) % 36000);
-                    location_data.TimeStamp = (float)fmod((millis() / 1000.0), 3600.0);
-                    Serial.printf("Current TimeStamp: %.1f s\n", location_data.TimeStamp);
-                    //Serial.printf("time is %u\r\n",location_data.TimeStamp);
                     break;
                 }
                 case MAVLINK_MSG_ID_HEARTBEAT: {
@@ -120,48 +101,44 @@ void handle_mavlink() {
                     mavlink_msg_heartbeat_decode(&mav_msg, &hb);
                    // 判断是否解锁
                     if (hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) {
-                        location_data.Status = ODID_STATUS_AIRBORNE;
+                        //location_data.Status = ODID_STATUS_AIRBORNE;
+                        GB46750_Data_T.op_status = 2;//空中
                     } else {
-                        location_data.Status = ODID_STATUS_GROUND;
+                        GB46750_Data_T.op_status = 1;//地面
                     }
+                    break;
+                }
+                case MAVLINK_MSG_ID_SCALED_PRESSURE: {
+                    mavlink_scaled_pressure_t sp;
+                    mavlink_msg_scaled_pressure_decode(&mav_msg,&sp);
+                    GB46750_Data_T.alt_baro = (int)(44330.0f * (1.0f - pow((sp.press_abs / 1013.25f), 0.190295f)));
+
+                    break;
+                }
+                case MAVLINK_MSG_ID_SYSTEM_TIME: {
+                mavlink_system_time_t tb;
+                mavlink_msg_system_time_decode(&mav_msg, &tb);
+                //printf("Original Unix (us): %llu\n", tb.time_unix_usec);
+                GB46750_Data_T.timestamp_ms = tb.time_unix_usec/1000;
+                time_last.system_time_lasttime = millis();
                     break;
                 }
 case MAVLINK_MSG_ID_GPS_RAW_INT: {
     mavlink_gps_raw_int_t gps;
     mavlink_msg_gps_raw_int_decode(&mav_msg, &gps);
+    GB46750_Data_T.horiz_accuracy = get_gb46750_horiz_accuracy(gps.h_acc);
+    GB46750_Data_T.vert_accuracy = get_gb46750_vert_accuracy(gps.v_acc);
+    GB46750_Data_T.speed_accuracy = get_gb46750_speed_accuracy(gps.vel_acc);
 
-    // 1. 垂直精度 (注意这里改成了 VertAccuracy)
-    float v_acc_m = gps.v_acc / 1000.0f; 
-    location_data.VertAccuracy = createEnumVerticalAccuracy(v_acc_m);
-   // Serial.printf("GPS 原始垂直精度 (mm): %u\n", gps.v_acc);
-    // 2. 水平精度 (顺便检查一下这个，通常是 HorizAccuracy)
-    float h_acc_m = gps.h_acc / 1000.0f;
-    location_data.HorizAccuracy = createEnumHorizontalAccuracy(h_acc_m);
-    //Serial.printf("GPS 原始垂直精度 (mm): %u\n", gps.h_acc);
-    // 3. 速度精度 (如果报错，可以去 .h 文件里搜一下 SpeedAcc 关键字)
-    float s_acc_ms = gps.vel_acc / 1000.0f;
-    location_data.SpeedAccuracy = createEnumSpeedAccuracy(s_acc_ms);
-    //Serial.printf("GPS 原始垂直精度 (mm): %u\n", gps.vel_acc);
-    //location_data.BaroAccuracy = 
     break;
 }
 case MAVLINK_MSG_ID_HOME_POSITION: {
     mavlink_home_position_t home;
     mavlink_msg_home_position_decode(&mav_msg, &home);
+        GB46750_Data_T.station_lat = home.latitude;
+        GB46750_Data_T.station_lon = home.longitude;
+        GB46750_Data_T.station_alt_geo = home.altitude/1000.0f;
 
-    // 1. 坐标转换：MAVLink 原始数据是 degE7 (整数)，需要除以 1e7
-    system_data.OperatorLatitude = home.latitude / 10000000.0;
-    system_data.OperatorLongitude = home.longitude / 10000000.0;
-    
-    // 2. 高度转换：单位从 mm 转为 m
-    system_data.OperatorAltitudeGeo = home.altitude / 1000.0f; 
-
-    // 3. 设置操作员位置类型
-    // 在 RemoteID 协议中，1 代表“固定坐标”（即起飞点/Home点）
-    system_data.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_FIXED;
-
-    // 4. 设置分类（可选：通常默认 0 即可，除非有特定法规需求）
-    system_data.ClassificationType = ODID_CLASSIFICATION_TYPE_UNDECLARED;
 
 
     break;
@@ -170,178 +147,250 @@ case MAVLINK_MSG_ID_HOME_POSITION: {
         }
     }
 }
-void request_remoteid_messages() {
+// 辅助函数：生成指定范围的随机浮点数
+static float randomFloat(float min, float max) {
+    return min + (float)rand() / ((float)RAND_MAX / (max - min));
+}
+
+// 辅助函数：生成指定范围的随机整数
+static int randomInt(int min, int max) {
+    return min + rand() % (max - min + 1);
+}
+
+// 主函数：填充模拟的无人机数据
+void fillODID_ExampleData(ODID_UAS_Data &UAS_data) 
+{
+    // 清空整个结构体
+    memset(&UAS_data, 0, sizeof(ODID_UAS_Data));
+    
+    // ============ Basic ID [0] ============
+    UAS_data.BasicIDValid[0] = 1;
+    UAS_data.BasicID[0].UAType = ODID_UATYPE_HELICOPTER_OR_MULTIROTOR;
+    UAS_data.BasicID[0].IDType = ODID_IDTYPE_SERIAL_NUMBER;
+    strcpy(UAS_data.BasicID[0].UASID, "DRONE12345678901234");
+    
+    // ============ Basic ID [1] (可选) ============
+    UAS_data.BasicIDValid[1] = 1;
+    UAS_data.BasicID[1].UAType = ODID_UATYPE_HELICOPTER_OR_MULTIROTOR;
+    UAS_data.BasicID[1].IDType = ODID_IDTYPE_CAA_REGISTRATION_ID;
+    strcpy(UAS_data.BasicID[1].UASID, "REG87654321ABCDEFGH");
+    
+    // ============ Location ============
+    UAS_data.LocationValid = 1;
+    UAS_data.Location.Status = ODID_STATUS_AIRBORNE;
+    
+    // 模拟飞行中的位置（例如：美国硅谷附近）
+    UAS_data.Location.Latitude = 37.422 + randomFloat(-0.01, 0.01);    // 北纬37.422度
+    UAS_data.Location.Longitude = -122.084 + randomFloat(-0.01, 0.01); // 西经122.084度
+    UAS_data.Location.AltitudeBaro = 120.5f;   // 气压高度 120.5米
+    UAS_data.Location.AltitudeGeo = 125.3f;    // 大地高度 125.3米
+    UAS_data.Location.HeightType = ODID_HEIGHT_REF_OVER_TAKEOFF;
+    UAS_data.Location.Height = 100.0f;         // 相对起飞点高度 100米
+    
+    // 飞行方向（0-359度，正北为0）
+    UAS_data.Location.Direction = 45.0f;       // 向东北方向飞行
+    UAS_data.Location.SpeedHorizontal = 12.5f; // 水平速度 12.5 m/s
+    UAS_data.Location.SpeedVertical = 0.5f;    // 垂直速度 0.5 m/s（缓慢上升）
+    
+    // 精度信息
+    UAS_data.Location.HorizAccuracy = createEnumHorizontalAccuracy(5.0f);  // 5米水平精度
+    UAS_data.Location.VertAccuracy = createEnumVerticalAccuracy(3.0f);     // 3米垂直精度
+    UAS_data.Location.BaroAccuracy = createEnumVerticalAccuracy(1.0f);     // 1米气压精度
+    UAS_data.Location.SpeedAccuracy = createEnumSpeedAccuracy(1.0f);       // 1 m/s速度精度
+    UAS_data.Location.TSAccuracy = createEnumTimestampAccuracy(0.1f);      // 0.1秒时间精度
+    
+    // 时间戳（UTC时间，从整点开始计算的秒数）
+    time_t now = time(NULL);
+    struct tm *utc_time = gmtime(&now);
+    UAS_data.Location.TimeStamp = utc_time->tm_min * 60 + utc_time->tm_sec; // 从整点开始秒数
+    
+    // ============ Self ID ============
+    UAS_data.SelfIDValid = 1;
+    UAS_data.SelfID.DescType = ODID_DESC_TYPE_TEXT;
+    strcpy(UAS_data.SelfID.Desc, "Search and Rescue Drone"); // 描述文本（最大23字符）
+    
+    // ============ System ============
+    UAS_data.SystemValid = 1;
+    UAS_data.System.OperatorLocationType = ODID_OPERATOR_LOCATION_TYPE_TAKEOFF;
+    UAS_data.System.ClassificationType = ODID_CLASSIFICATION_TYPE_EU;
+    
+    // 操作者位置（起飞点）
+    UAS_data.System.OperatorLatitude = 37.420;   // 起飞点纬度
+    UAS_data.System.OperatorLongitude = -122.080; // 起飞点经度
+    UAS_data.System.OperatorAltitudeGeo = 25.0f; // 起飞点海拔高度
+    
+    UAS_data.System.AreaCount = 1;
+    UAS_data.System.AreaRadius = 500;     // 操作区域半径500米
+    UAS_data.System.AreaCeiling = 150.0f; // 区域限高150米
+    UAS_data.System.AreaFloor = 0.0f;     // 区域限低0米
+    
+    // EU分类信息
+    UAS_data.System.CategoryEU = ODID_CATEGORY_EU_SPECIFIC;
+    UAS_data.System.ClassEU = ODID_CLASS_EU_CLASS_3;
+    
+    UAS_data.System.Timestamp = (uint32_t)time(NULL); // Unix时间戳
+    
+    // ============ Operator ID ============
+    UAS_data.OperatorIDValid = 1;
+    UAS_data.OperatorID.OperatorIdType = ODID_OPERATOR_ID;
+    strcpy(UAS_data.OperatorID.OperatorId, "OP123456789012345678");
+    
+    // ============ Auth (可选，这里不填充) ============
+    // 大多数情况下不需要认证数据
+    memset(&UAS_data.Auth, 0, sizeof(UAS_data.Auth));
+    memset(UAS_data.AuthValid, 0, sizeof(UAS_data.AuthValid));
+}
+void printODIDData(const ODID_UAS_Data &data) {
+    Serial.println("=== Open Drone ID Data ===");
+    
+    if (data.BasicIDValid[0]) {
+        Serial.printf("Basic ID[0]: %s\n", data.BasicID[0].UASID);
+    }
+    
+    if (data.LocationValid) {
+        Serial.printf("Lat: %.6f, Lon: %.6f\n", 
+                     data.Location.Latitude, 
+                     data.Location.Longitude);
+        Serial.printf("Alt: %.1fm, Height: %.1fm\n",
+                     data.Location.AltitudeGeo,
+                     data.Location.Height);
+    }
+}
+void request_system_time_once() {
     mavlink_message_t msg;
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 
-    // 设置消息发送频率
-    // 参数 1: 消息 ID (12901 代表 OPEN_DRONE_ID_LOCATION)
-    // 参数 2: 间隔时间 (单位：微秒。200000us = 200ms = 5Hz)
+    // 使用 MAV_CMD_REQUEST_MESSAGE (ID: 512) 来请求特定的消息 ID
     mavlink_msg_command_long_pack(
-        1, 255, &msg, 
-        1, 1,             // 目标系统 ID, 目标组件 ID (通常是 1, 1)
-        MAV_CMD_SET_MESSAGE_INTERVAL, 
-        0,                // 确认
-        12901,            // 参数 1: 消息 ID
-        200000,           // 参数 2: 间隔 (微秒)
-        0, 0, 0, 0, 0     // 其他参数不用管
+        1,                          // 本机 System ID
+        255,                        // 本机 Component ID (广播模块通常设为 255)
+        &msg,
+        1,                          // 目标 System ID (飞控一般为 1)
+        1,                          // 目标 Component ID (飞控一般为 1)
+        MAV_CMD_REQUEST_MESSAGE,    // 命令 ID: 512
+        0,                          // 确认标志
+        MAVLINK_MSG_ID_SYSTEM_TIME, // 参数 1: 想要请求的消息 ID (这里是 2)
+        0, 0, 0, 0, 0, 0            // 参数 2-7: 无效
     );
 
     uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
-    Serial1.write(buf, len); // 假设你的飞控接在 Serial1
-    Serial.println("已请求飞控发送 RemoteID 透传包...");
+    Serial2.write(buf, len); // 通过连接飞控的串口发送
+    
+    //Serial.println("Sent request for SYSTEM_TIME to Flight Controller.");
 }
 
-// --- [ 4. 广播逻辑 ] ---
-void broadcast_odid() {
-    uint8_t packet[31];
-    memset(packet, 0, 31);
-    memcpy(packet, header, 5);
-    if (legacy_phase == 5) legacy_phase = 6;
-    if (legacy_phase > 6) legacy_phase = 0;
-    switch (legacy_phase) {
-        case 0: { //发送位置信息
-            packet[5] = msg_counters[0]++; 
-            // 注意：这里不再执行 odid_initLocationData，否则会擦除 handle_mavlink 存入的数据
-            ODID_Location_encoded location_enc;
-            encodeLocationMessage(&location_enc, &location_data);
-            memcpy(&packet[6], &location_enc, ODID_MESSAGE_SIZE);
-            send_packet(packet, 31);
+void loadSettings() {
+    prefs.begin("remoteid", true);
+    String p = prefs.getString("pid", "SN000000000000000000");
+    memset(GB46750_Data_T.uas_id, 0, sizeof(GB46750_Data_T.uas_id)); // 清空
+    strncpy(GB46750_Data_T.uas_id, p.c_str(), 20); // 最多拷贝20字节
 
-            break;
-        }
-        case 1: { //发送民航信息飞机信息
-            packet[5] = msg_counters[1]++;
-            ODID_BasicID_encoded basicID_enc;
-            encodeBasicIDMessage(&basicID_enc, &basicID_data[0]);
-            memcpy(&packet[6], &basicID_enc, ODID_MESSAGE_SIZE);
-            send_packet(packet, 31);
-            break;
-        }
-        case 2: { //发送签名
-            packet[5] = msg_counters[2]++;
-            ODID_SelfID_encoded selfID_enc;
-            encodeSelfIDMessage(&selfID_enc, &selfID_data);
-            memcpy(&packet[6], &selfID_enc, ODID_MESSAGE_SIZE);
-            send_packet(packet, 31);
-            break;
-        }
-        case 3: { //
-            packet[5] = msg_counters[3]++;
-            ODID_System_encoded system_enc;
-            encodeSystemMessage(&system_enc, &system_data);
-            memcpy(&packet[6], &system_enc, ODID_MESSAGE_SIZE);
-            send_packet(packet, 31);
-            break;
-        }
-        case 4: { //发送驾驶证信息
-            packet[5] = msg_counters[4]++;
-            ODID_OperatorID_encoded operatorID_enc;
-            encodeOperatorIDMessage(&operatorID_enc, &operatorID_data);
-            memcpy(&packet[6], &operatorID_enc, ODID_MESSAGE_SIZE);
-            send_packet(packet, 31);
-            break;
-        }
-        case 6: { //发送系统蓝牙数据
-            const uint8_t name_header[] = { 0x02, 0x01, 0x06, 11, 0x09 }; 
-            memcpy(packet, name_header, 5);
-            memcpy(&packet[5], "MFE_S3_FLY", 10);
-            send_packet(packet, 15);
-            break;
-        }
-    }
+    String r = prefs.getString("reg", "00000000");
+    memset(GB46750_Data_T.registration, 0, sizeof(GB46750_Data_T.registration));
+    strncpy(GB46750_Data_T.registration, r.c_str(), 8);
 
-    legacy_phase++;
+    strncpy(productID, p.c_str(), 20);
+    strncpy(regMark, r.c_str(), 8);
+    opCategory = prefs.getInt("cat", 0);
+    uaClass = prefs.getInt("uac", 0);
 
-}
-
-void send_packet(uint8_t* data, int len) {
-    BLEAdvertisementData oAdvData;
-    String payload = "";
-    for (int i = 0; i < len; i++) payload += (char)data[i];
-    oAdvData.addData(payload);
-    pAdvertising->setAdvertisementData(oAdvData);
-}
-
-// --- [ 5. 主程序 ] ---
-void setup() {
-    // 1. 优先读取配置
-    prefs.begin("mfe_config", true);
-    String s_id = prefs.getString("uasid", ""); 
-    String o_id = prefs.getString("opid", "");
-    baud_rate = prefs.getInt("baud", 57600); // 新设备默认 57600
-    saved_ua_type = (uint8_t)prefs.getInt("ua_type", 0); // 默认 None
-    saved_id_type = (uint8_t)prefs.getInt("id_type", 0); // 默认 None
-    String s_desc = prefs.getString("self_desc", "NONE"); // 默认值
-    int s_type = prefs.getInt("self_type", 0);
+    GB46750_Data_T.run_category = (uint8_t)prefs.getInt("cat", 0);
+    GB46750_Data_T.ua_category = (uint8_t)prefs.getInt("uac", 0);
+    baudRate = prefs.getInt("baud", 57600);
     prefs.end();
-
-    // 2. 启动串口
-    Serial.begin(115200);
-    Serial2.begin(baud_rate, SERIAL_8N1, 16, 17); 
-
-    // 3. 初始化 ODID 结构体 (只应用配置的值)
-    odid_initLocationData(&location_data);
-
-    odid_initBasicIDData(&basicID_data[0]);
-    // 注意：你发来的库里枚举是 ODID_idtype_t，不是 ODID_id_type_t
-    basicID_data[0].IDType = (ODID_idtype_t)saved_id_type; 
-    if (s_id.length() > 0) {
-        strncpy(basicID_data[0].UASID, s_id.c_str(), ODID_ID_SIZE);
-    }
-
-    odid_initSystemData(&system_data);
-    basicID_data[0].UAType = (ODID_uatype_t)saved_ua_type; // 修正后的层级
-
-     odid_initOperatorIDData(&operatorID_data);
-    if (o_id.length() > 0) {
-        strncpy(operatorID_data.OperatorId, o_id.c_str(), ODID_ID_SIZE);
-    }
-    odid_initSelfIDData(&selfID_data);
-    selfID_data.DescType = (ODID_desctype_t)s_type; // 应用网页选的类型
-    if (s_desc.length() > 0) {
-        strncpy(selfID_data.Desc, s_desc.c_str(), ODID_STR_SIZE);
-    }
-
-
-    // 4. 启动 WiFi 配置门户
-// 1. 获取 6 字节的原始 MAC
-uint8_t mac[6];
-WiFi.macAddress(mac);
-
-// 2. 使用最后两个字节生成十六进制字符串
-char hexID[5];
-sprintf(hexID, "%02X%02X", mac[4], mac[5]); // 取最后两个字节，比如 EE 和 FF
-
-// 3. 拼接
-String apName = "RemoteID-" + String(hexID);
-WiFi.softAP(apName.c_str(), "12345678");
-    httpUpdater.setup(&server, "/update");
-    server.on("/", handleRoot);
-    server.on("/save", HTTP_POST, handleSave);
-    server.begin();
     
-    // 5. 启动蓝牙广播
-    BLEDevice::init("");
-    pAdvertising = BLEDevice::getAdvertising();
-    pAdvertising->setAdvertisementType(ADV_TYPE_NONCONN_IND);
-    pAdvertising->setScanResponse(false);
-    pAdvertising->start();
-    
-    Serial.println("MFE System Started.");
 }
 
-void loop() {
-     
-    server.handleClient(); // 处理网页请求
-    // 1. 尽可能快地解析串口数据
-    handle_mavlink();
+void handleSave() {
+    prefs.begin("remoteid", false);
+    if (server.hasArg("pid")) prefs.putString("pid", server.arg("pid"));
+    if (server.hasArg("reg")) prefs.putString("reg", server.arg("reg"));
+    if (server.hasArg("cat")) prefs.putInt("cat", server.arg("cat").toInt());
+    if (server.hasArg("uac")) prefs.putInt("uac", server.arg("uac").toInt());
+    if (server.hasArg("baud")) prefs.putInt("baud", server.arg("baud").toInt());
+    prefs.end();
+    
+    String message = "<center><h2 style='font-family:sans-serif;'>保存成功，设备正在重启...</h2><p>请在 5 秒后重新连接 WiFi 并刷新页面。</p></center>";
+    server.send(200, "text/html; charset=utf-8", message);
+    delay(2000);
+    ESP.restart();
+}
 
-    // 2. 定时发送广播
-    static unsigned long last_ms = 0;
-    if (millis() - last_ms > 100) { 
-        last_ms = millis();
-        broadcast_odid();
+void handleRoot() {
+    String s = index_html;
+    // 简单的字符串替换来填充当前值（实际开发建议用更高效的方式）
+    s.replace("%PID%", productID); s.replace("%REG%", regMark);
+    s.replace("%C" + String(opCategory) + "%", "selected");
+    s.replace("%A" + String(uaClass) + "%", "selected");
+    s.replace("%B" + String(baudRate == 57600 ? 1 : 2) + "%", "selected");
+    server.send(200, "text/html; charset=utf-8", s);
+}
+
+void initWiFi() {
+    WiFi.mode(WIFI_AP); 
+    delay(100); 
+
+    String macStr = WiFi.softAPmacAddress();
+    String suffix = macStr;
+    suffix.replace(":", "");
+    suffix = suffix.substring(suffix.length() - 6);
+    suffix.toUpperCase();
+
+    char ssid[32];
+    sprintf(ssid, "RemoteID_%s", suffix.c_str());
+    
+    // 启动 AP
+    if(WiFi.softAP(ssid, "12345678")) {
+        Serial.print("Access Point Started. SSID: ");
+        Serial.println(ssid);
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.softAPIP());
+
+        // --- 必须添加以下代码来启动 Web 服务 ---
+        server.on("/", handleRoot);            // 绑定主页
+        server.on("/save", HTTP_POST, handleSave); // 绑定保存接口
+        ElegantOTA.begin(&server);             // 启动 OTA 接口
+        server.begin();                        // 真正开启服务器
+        Serial.println("HTTP server started");
+        // ------------------------------------
     }
+}
+void setup()
+{
+    Serial.begin(115200);
+    gb46750_fill_mock(&GB46750_Data_T);
+    Serial.printf("Broadcast ID: %s, Reg: %s\n", GB46750_Data_T.uas_id, GB46750_Data_T.registration);
+    loadSettings(); // 1. 先读配置
+    srand(time(NULL));
+
+ Serial2.begin(baudRate, SERIAL_8N1, 16, 17); 
+ initWiFi(); // 3. 启动 Web 服务
+//odid_initUasData(&UAS_data);
+  //  fillODID_ExampleData(UAS_data);
+    //gb46750_fill_mock(&GB46750_Data_T);
+    // 打印数据用于验证
+   
+    
+}
+void loop()
+{
+    server.handleClient(); // 处理网页请求
+    ElegantOTA.loop();     // 处理 OTA 任务
+    handle_mavlink();
+    static uint32_t last_send_time = 0;
+    if (millis() - last_send_time >= 1000) {
+        last_send_time = millis();
+      //ble.transmit_longrange(UAS_data);
+     ble.GB46750_LongSend(GB46750_Data_T);
+     
+    }
+    //delay(100);
+    if((millis()-time_last.system_time_lasttime)>=2000)
+    {
+        time_last.system_time_lasttime = millis();
+     request_system_time_once();
+    }
+    //handle_mavlink();
+
 
 }

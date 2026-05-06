@@ -9,7 +9,7 @@ Maintainer:
 Gabriel Cox
 gabriel.c.cox@intel.com
 */
-
+#include <errno.h>//手动添加
 #include "opendroneid.h"
 #include <math.h>
 #include <stdio.h>
@@ -24,6 +24,76 @@ const int ALT_ADDER = 1000;
 static char *safe_dec_copyfill(char *dstStr, const char *srcStr, int dstSize);
 static int intRangeMax(int64_t inValue, int startRange, int endRange);
 static int intInRange(int inValue, int startRange, int endRange);
+
+
+int odid_message_build_pack(ODID_UAS_Data *UAS_Data, void *pack, size_t buflen)
+{
+    ODID_MessagePack_data msg_pack;
+    ODID_MessagePack_encoded *msg_pack_enc;
+    size_t len;
+
+    /* create a complete message pack */
+    msg_pack.SingleMessageSize = ODID_MESSAGE_SIZE;
+    msg_pack.MsgPackSize = 0;
+    for (int i = 0; i < ODID_BASIC_ID_MAX_MESSAGES; i++) {
+        if (UAS_Data->BasicIDValid[i]) {
+            if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+                return -EINVAL;
+            if (encodeBasicIDMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->BasicID[i]) == ODID_SUCCESS)
+                msg_pack.MsgPackSize++;
+        }
+    }
+    if (UAS_Data->LocationValid) {
+        if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+            return -EINVAL;
+        if (encodeLocationMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->Location) == ODID_SUCCESS)
+            msg_pack.MsgPackSize++;
+    }
+    for (int i = 0; i < ODID_AUTH_MAX_PAGES; i++)
+    {
+        if (UAS_Data->AuthValid[i]) {
+            if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+                return -EINVAL;
+            if (encodeAuthMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->Auth[i]) == ODID_SUCCESS)
+                msg_pack.MsgPackSize++;
+        }
+    }
+    if (UAS_Data->SelfIDValid) {
+        if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+            return -EINVAL;
+        if (encodeSelfIDMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->SelfID) == ODID_SUCCESS)
+            msg_pack.MsgPackSize++;
+    }
+    if (UAS_Data->SystemValid) {
+        if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+            return -EINVAL;
+        if (encodeSystemMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->System) == ODID_SUCCESS)
+            msg_pack.MsgPackSize++;
+    }
+    if (UAS_Data->OperatorIDValid) {
+        if (msg_pack.MsgPackSize >= ODID_PACK_MAX_MESSAGES)
+            return -EINVAL;
+        if (encodeOperatorIDMessage((void *)&msg_pack.Messages[msg_pack.MsgPackSize], &UAS_Data->OperatorID) == ODID_SUCCESS)
+            msg_pack.MsgPackSize++;
+    }
+
+    /* check that there is at least one message to send. */
+    if (msg_pack.MsgPackSize == 0)
+        return -EINVAL;
+
+    /* calculate the exact encoded message pack size. */
+    len = sizeof(*msg_pack_enc) - (ODID_PACK_MAX_MESSAGES - msg_pack.MsgPackSize) * ODID_MESSAGE_SIZE;
+
+    /* check if there is enough space for the message pack. */
+    if (len > buflen)
+        return -ENOMEM;
+
+    msg_pack_enc = (ODID_MessagePack_encoded *) pack;
+    if (encodeMessagePack(msg_pack_enc, &msg_pack) != ODID_SUCCESS)
+        return -1;
+
+    return (int) len;
+}
 
 /**
 * Initialize basic ID data fields to their default values
