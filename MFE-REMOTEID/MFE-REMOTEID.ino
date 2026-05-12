@@ -337,7 +337,7 @@ void initWiFi() {
     suffix.toUpperCase();
 
     char ssid[32];
-    sprintf(ssid, "RemoteID_%s", suffix.c_str());
+    sprintf(ssid, "Remote ID_%s", suffix.c_str());
     
     // 启动 AP
     if(WiFi.softAP(ssid, "12345678")) {
@@ -363,7 +363,7 @@ void setup()
     loadSettings(); // 1. 先读配置
     srand(time(NULL));
 
- Serial2.begin(baudRate, SERIAL_8N1, 16, 17); 
+ Serial2.begin(baudRate, SERIAL_8N1, 18, 17); 
  initWiFi(); // 3. 启动 Web 服务
 //odid_initUasData(&UAS_data);
   //  fillODID_ExampleData(UAS_data);
